@@ -27,8 +27,11 @@
 
 
 typedef void (*ParasitePythonLogger)(const char *text, gpointer user_data);
-
+#if PY_MAJOR_VERSION >= 3
+PyObject* parasite_python_init(void);
+#else
 void parasite_python_init(void);
+#endif
 void parasite_python_run(const char *command,
                          ParasitePythonLogger stdout_logger,
                          ParasitePythonLogger stderr_logger,

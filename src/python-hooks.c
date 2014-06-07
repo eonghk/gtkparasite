@@ -21,15 +21,18 @@
  * THE SOFTWARE.
  */
 #include <dlfcn.h>
+
 #include "config.h"
-#include <signal.h>
 
 #ifdef ENABLE_PYTHON
-# include <Python.h>
-# include <pygobject.h>
-#endif
+#include <Python.h>
+#include <pygobject.h>
+#endif // ENABLE_PYTHON
+
+#include <signal.h>
 
 #include "python-hooks.h"
+
 
 static gboolean python_enabled = FALSE;
 
@@ -37,6 +40,16 @@ static gboolean python_enabled = FALSE;
 static GString *captured_stdout = NULL;
 static GString *captured_stderr = NULL;
 
+struct module_state {
+    PyObject *error;
+};
+
+#if PY_MAJOR_VERSION >= 3
+#define GETSTATE(m) ((struct module_state*)PyModule_GetState(m))
+#else
+#define GETSTATE(m) (&_state)
+static struct module_state _state;
+#endif
 
 static PyObject *
 capture_stdout(PyObject *self, PyObject *args)
@@ -93,7 +106,6 @@ static PyMethodDef parasite_python_methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
-
 static gboolean
 is_blacklisted(void)
 {
@@ -103,12 +115,46 @@ is_blacklisted(void)
 }
 #endif // ENABLE_PYTHON
 
+#if PY_MAJOR_VERSION >= 3
+
+static int parasite_traverse(PyObject *m, visitproc visit, void *arg) {
+    Py_VISIT(GETSTATE(m)->error);
+    return 0;
+}
+
+static int parasite_clear(PyObject *m) {
+    Py_CLEAR(GETSTATE(m)->error);
+    return 0;
+}
+
+
+static struct PyModuleDef moduledef = {
+        PyModuleDef_HEAD_INIT,
+        "parasite_python",
+        NULL,
+        sizeof(struct module_state),
+        parasite_python_methods,
+        NULL,
+        parasite_traverse,
+        parasite_clear,
+        NULL
+};
+
+#define INITERROR return NULL
+
+PyObject *
+parasite_python_init(void)
+#else
 void
 parasite_python_init(void)
+#endif
 {
+
 #ifdef ENABLE_PYTHON
     int res;
     struct sigaction old_sigint;
+    PyObject *pygobject;
+    PyObject *pygtk;
 
     if (is_blacklisted())
         return;
@@ -130,8 +176,11 @@ parasite_python_init(void)
         Py_Initialize();
 
     res = sigaction(SIGINT, &old_sigint, NULL);
-
-    Py_InitModule("parasite", parasite_python_methods);
+#if PY_MAJOR_VERSION >= 3
+    PyObject *module = PyModule_Create(&moduledef);
+#else
+    PyObject *module = Py_InitModule("parasite", parasite_python_methods);
+#endif
     PyRun_SimpleString(
         "import parasite\n"
         "import sys\n"
@@ -145,34 +194,23 @@ parasite_python_init(void)
         "        parasite.capture_stderr(str)\n"
         "\n"
     );
+    PyRun_SimpleString("sys.argv = []");
 
     if (!pygobject_init(-1, -1, -1))
-    {
-        fprintf(stderr, "Error initializing pygobject support.\n");
-        PyErr_Print();
         return;
+    pygobject = PyImport_ImportModule("gi._gobject");
+    PyImport_ImportModule("gi.repository");
+    pygtk = PyImport_ImportModule("gi.repository.Gtk");
+
+    if (pygobject == NULL) {
+      PyErr_SetString(PyExc_ImportError, "could not import gtk");
+      return;
     }
 
-    char *argv[] = { "", NULL };
-    PySys_SetArgv(0, argv);
-
-    if (!PyImport_ImportModule("gi._gobject"))
-      {
-        PyErr_SetString(PyExc_ImportError, "could not import gi.gobject");
-        return;
-      }
-    if (!PyImport_ImportModule("gi.repository"))
-      {
-        PyErr_SetString(PyExc_ImportError, "could not import gi.repository");
-        return;
-      }
-    if (!PyImport_ImportModule("gi.repository.Gtk"))
-      {
-        PyErr_SetString(PyExc_ImportError, "could not import gtk");
-        return;
-      }
-
     python_enabled = TRUE;
+#if PY_MAJOR_VERSION >= 3
+    return module;
+#endif
 #endif // ENABLE_PYTHON
 }
 
@@ -213,12 +251,18 @@ parasite_python_run(const char *command,
     if (obj != NULL && obj != Py_None) {
        PyObject *repr = PyObject_Repr(obj);
        if (repr != NULL) {
+#if PY_MAJOR_VERSION >= 3
+           PyObject* pyStr = PyUnicode_AsEncodedString(repr, "utf-8", "Encode String Error!");
+           char *string = PyBytes_AS_STRING(pyStr);
+#else
            char *string = PyString_AsString(repr);
-
+#endif
            stdout_logger(string, user_data);
            stdout_logger("\n", user_data);
+#if PY_MAJOR_VERSION >= 3
+           Py_XDECREF(pyStr);
+#endif
         }
-
         Py_XDECREF(repr);
     }
     Py_XDECREF(obj);
